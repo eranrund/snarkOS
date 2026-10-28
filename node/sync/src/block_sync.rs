@@ -2730,7 +2730,8 @@ mod tests {
         let (peer_a, peer_b) = (sample_peer_ip(1), sample_peer_ip(2));
         sync.update_peer_locators(peer_a, &sample_block_locators(1_100)).unwrap();
         sync.update_peer_locators(peer_b, &sample_block_locators(1_060)).unwrap();
-        // The peers diverge at block 1,020, below the batch start.
+        // Synthetic: consistent locators cannot have an ancestor below their overlap. The override
+        // only forces construct_requests to return nothing for the batch.
         sync.common_ancestors.write().insert(PeerPair(peer_a, peer_b), 1_020);
         sync.failed_requests.lock().extend((1_050..=1_060).map(|height| (height, (None, None))));
 
