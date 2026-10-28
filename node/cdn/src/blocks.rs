@@ -163,7 +163,9 @@ impl CdnBlockSync {
                     if node_height != completed_height {
                         return CdnSyncOutcome::Failed(
                             completed_height,
-                            error.context("The ledger height does not match the last sync height"),
+                            error.context(format!(
+                                "The ledger is at block {node_height} but the CDN sync completed block {completed_height}"
+                            )),
                         );
                     }
 
