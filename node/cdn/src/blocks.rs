@@ -163,13 +163,16 @@ impl CdnBlockSync {
                     if node_height != completed_height {
                         return CdnSyncOutcome::Failed(
                             completed_height,
-                            anyhow!("The ledger height does not match the last sync height"),
+                            error.context("The ledger height does not match the last sync height"),
                         );
                     }
 
                     // Fetch the latest block from the ledger.
                     if let Err(err) = ledger.get_block(node_height) {
-                        return CdnSyncOutcome::Failed(completed_height, err);
+                        return CdnSyncOutcome::Failed(
+                            completed_height,
+                            error.context(format!("Failed to read block {node_height} from the ledger: {err:#}")),
+                        );
                     }
                 }
 
