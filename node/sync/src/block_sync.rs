@@ -1210,10 +1210,11 @@ impl<N: Network> BlockSync<N> {
 
                 let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, Some(start))
                 else {
-                    // No connected peer can serve this range: they disconnected, or have all pruned it
-                    // (see `sync_stuck_below_peer_floors`). The requests stay queued for a later round.
-                    debug!("Cannot re-request blocks {start_height}..{end_height}: no connected peer can serve them");
-                    return result;
+                    // No connected peer can serve this range: they disconnected, pruned it (see
+                    // `sync_stuck_below_peer_floors`), or have not reached it yet. The requests stay
+                    // queued until a peer that has reached `start` connects.
+                    debug!("Cannot re-request blocks {start}..{end_height}: no connected peer has them");
+                    continue;
                 };
 
                 // Retrieve the greatest block height of any connected peer.
@@ -2705,6 +2706,20 @@ mod tests {
         assert!(sync.failed_requests.lock().is_empty());
         // Without a first needed height, both peers are sync peers.
         assert_eq!(sync.find_sync_peers().unwrap().0.len(), 2);
+    }
+
+    /// Tests that a failed batch no connected peer has reached stays queued and does not block new
+    /// requests from the peers below it.
+    #[test]
+    fn test_failed_batch_above_all_peers_falls_through() {
+        let sync = sample_sync_at_height(1_000);
+        add_peers(&sync, 1, 2, 1_040);
+        // The peer that served 1,050..=1,060 timed out and was removed.
+        sync.failed_requests.lock().extend((1_050..=1_060).map(|height| (height, (None, None))));
+
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.first().unwrap().0, 1_001);
+        assert_eq!(sync.failed_requests.lock().len(), 11);
     }
 
     /// Tests that a failed batch no peer cohort can cover yet stays queued and does not block new
