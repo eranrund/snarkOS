@@ -1240,10 +1240,12 @@ impl<N: Network> BlockSync<N> {
                     failed_requests.remove(height);
                 }
 
-                result.push((requests, sync_peers));
+                if !requests.is_empty() {
+                    result.push((requests, sync_peers));
+                }
             }
 
-            // If every batch was obsolete, fall through to new requests.
+            // If no batch was re-issued, fall through to new requests.
             if !result.is_empty() {
                 return result;
             }
@@ -2703,6 +2705,23 @@ mod tests {
         assert!(sync.failed_requests.lock().is_empty());
         // Without a first needed height, both peers are sync peers.
         assert_eq!(sync.find_sync_peers().unwrap().0.len(), 2);
+    }
+
+    /// Tests that a failed batch no peer cohort can cover yet stays queued and does not block new
+    /// requests.
+    #[test]
+    fn test_failed_batch_without_requests_falls_through() {
+        let sync = sample_sync_at_height(1_000);
+        let (peer_a, peer_b) = (sample_peer_ip(1), sample_peer_ip(2));
+        sync.update_peer_locators(peer_a, &sample_block_locators(1_100)).unwrap();
+        sync.update_peer_locators(peer_b, &sample_block_locators(1_060)).unwrap();
+        // The peers diverge at block 1,020, below the batch start.
+        sync.common_ancestors.write().insert(PeerPair(peer_a, peer_b), 1_020);
+        sync.failed_requests.lock().extend((1_050..=1_060).map(|height| (height, (None, None))));
+
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.first().unwrap().0, 1_001);
+        assert_eq!(sync.failed_requests.lock().len(), 11);
     }
 
     /// Tests that a prepared batch is not sent to a peer whose learned floor rose above its start.
