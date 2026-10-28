@@ -315,11 +315,12 @@ pub async fn load_blocks<N: Network>(
         let next_blocks = std::mem::replace(&mut *candidate_blocks, retained_blocks);
         drop(candidate_blocks);
 
-        // Attempt to advance the ledger using the CDN block bundle.
+        // Attempt to advance the ledger using the CDN block bundle. The closure reports the last
+        // inserted height with any error, as it may fail partway through the bundle.
         let mut process_clone = process.clone();
         let stoppable_clone = stoppable.clone();
         let threadpool_clone = threadpool.clone();
-        current_height = tokio::task::spawn_blocking(move || {
+        let bundle_result = tokio::task::spawn_blocking(move || {
             threadpool_clone.install(|| {
                 for block in next_blocks.into_iter().filter(|b| (start_height..end_height).contains(&b.height())) {
                     // If we are instructed to shut down, abort.
@@ -333,7 +334,9 @@ pub async fn load_blocks<N: Network>(
                     let block_height = block.height();
 
                     // Insert the block into the ledger.
-                    process_clone(block)?;
+                    if let Err(error) = process_clone(block) {
+                        return Err((current_height, error));
+                    }
 
                     // Update the current height.
                     current_height = block_height;
@@ -349,9 +352,11 @@ pub async fn load_blocks<N: Network>(
                 Ok(current_height)
             })
         })
-        .await
-        .map_err(|e| (current_height, e.into()))?
-        .map_err(|e| (current_height, e))?;
+        .await;
+        current_height = match bundle_result {
+            Ok(result) => result?,
+            Err(error) => return Err((current_height, error.into())),
+        };
     }
 
     Ok(current_height)
@@ -642,6 +647,22 @@ mod tests {
                 assert_eq!(block.height(), start + i as u32);
             }
         });
+    }
+
+    /// Tests that a failure partway through a bundle reports the last inserted height.
+    #[test]
+    fn test_load_blocks_reports_height_on_process_failure() {
+        let process = |block: Block<CurrentNetwork>| match block.height() {
+            10 => Err(anyhow::anyhow!("rejected")),
+            _ => Ok(()),
+        };
+        let testnet_cdn_url = Uri::try_from(format!("{CDN_BASE_URL}/mainnet")).unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (completed_height, error) =
+            rt.block_on(load_blocks(&testnet_cdn_url, 0, Some(50), SimpleStoppable::new(), process)).unwrap_err();
+        assert_eq!(completed_height, 9);
+        assert_eq!(error.to_string(), "rejected");
     }
 
     #[test]
