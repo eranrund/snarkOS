@@ -1720,7 +1720,8 @@ impl<N: Network> BlockSync<N> {
     ///
     /// Unlike [`Self::find_sync_peers`] this does not only return the latest locators height, but the full BlockLocators for each peer.
     /// Returns `None` if there are no peers to sync from. With `first_needed`, the first block to be
-    /// requested, peers assumed to have pruned it, by their tip or their learned floor, are excluded.
+    /// requested, peers that have not reached it, or are assumed to have pruned it by their tip or
+    /// their learned floor, are excluded.
     ///
     /// # Locking
     /// This function will read-lock `common_ancestors`.
@@ -1734,7 +1735,8 @@ impl<N: Network> BlockSync<N> {
 
         // Pick a set of peers above the latest ledger height, and include their locators.
         // This will sort the peers by locator height in descending order.
-        // Peers assumed to have pruned the authority data of the first needed block are excluded.
+        // Peers that have not reached the first needed block, or are assumed to have pruned its
+        // authority data, are excluded.
         let candidate_locators: IndexMap<_, _> = {
             let locators = self.locators.read();
             let learned_floors = self.learned_floors.lock();
@@ -1743,7 +1745,9 @@ impl<N: Network> BlockSync<N> {
                 .filter(|(peer_ip, locators)| {
                     let peer_tip = locators.latest_locator_height();
                     peer_tip > current_height
-                        && first_needed.is_none_or(|height| can_serve(peer_tip, learned_floors.get(*peer_ip), height))
+                        && first_needed.is_none_or(|height| {
+                            peer_tip >= height && can_serve(peer_tip, learned_floors.get(*peer_ip), height)
+                        })
                 })
                 .sorted_by(|(_, a), (_, b)| b.latest_locator_height().cmp(&a.latest_locator_height()))
                 .take(NUM_SYNC_CANDIDATE_PEERS)
@@ -2681,6 +2685,24 @@ mod tests {
         let (requests, _) = sync.prepare_block_requests().pop().unwrap();
         assert!(sync.failed_requests.lock().is_empty());
         assert_eq!(requests.first().unwrap().0, 1_011);
+    }
+
+    /// Tests that a failed batch is re-issued only by peers that have reached its start: a peer
+    /// below it would pull the cohort's common ancestor below the batch and stall it.
+    #[test]
+    fn test_failed_batch_excludes_peers_below_its_start() {
+        let sync = sample_sync_at_height(1_000);
+        let (peer_a, peer_b) = (sample_peer_ip(1), sample_peer_ip(2));
+        sync.update_peer_locators(peer_a, &sample_block_locators(1_100)).unwrap();
+        sync.update_peer_locators(peer_b, &sample_block_locators(1_020)).unwrap();
+        sync.failed_requests.lock().extend((1_050..=1_060).map(|height| (height, (None, None))));
+
+        let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.iter().map(|(height, _)| *height).collect::<Vec<_>>(), (1_050..=1_060).collect::<Vec<_>>());
+        assert_eq!(sync_peers.keys().collect::<Vec<_>>(), vec![&peer_a]);
+        assert!(sync.failed_requests.lock().is_empty());
+        // Without a first needed height, both peers are sync peers.
+        assert_eq!(sync.find_sync_peers().unwrap().0.len(), 2);
     }
 
     /// Tests that a prepared batch is not sent to a peer whose learned floor rose above its start.
