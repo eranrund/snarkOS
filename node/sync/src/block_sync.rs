@@ -1196,14 +1196,15 @@ impl<N: Network> BlockSync<N> {
                 let end_height = batch.last().unwrap().0 + 1;
 
                 // Re-issue from the first height not already requested (the batch is above
-                // `current_height`, see above), up to the end of the batch. A batch that is already
-                // requested in full is obsolete.
+                // `current_height`, see above), up to the end of the batch. The heights before it
+                // are outstanding, so they leave the failed requests; if none remain, the batch is
+                // obsolete.
                 let start = self.first_unrequested_height(start_height);
+                for height in start_height..start.min(end_height) {
+                    failed_requests.remove(&height);
+                }
                 let max_new_blocks_to_request = end_height.saturating_sub(start);
                 if max_new_blocks_to_request == 0 {
-                    for (height, _, _) in &batch {
-                        failed_requests.remove(height);
-                    }
                     continue;
                 }
 
@@ -2662,7 +2663,8 @@ mod tests {
     }
 
     /// Tests that a failed batch is re-issued from its first height not already requested, and only
-    /// up to its end; a batch that is already requested in full is dropped.
+    /// up to its end; its outstanding heights leave the failed requests, and a batch that is
+    /// outstanding in full is dropped.
     #[test]
     fn test_failed_batch_reissued_from_first_unrequested_height() {
         let sync = sample_sync_at_height(1_000);
@@ -2675,12 +2677,10 @@ mod tests {
 
         let (requests, _) = sync.prepare_block_requests().pop().unwrap();
         assert_eq!(requests.iter().map(|(height, _)| *height).collect::<Vec<_>>(), (1_006..=1_010).collect::<Vec<_>>());
-        assert_eq!(
-            sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(),
-            (1_001..=1_005).collect::<Vec<_>>()
-        );
+        assert!(sync.failed_requests.lock().is_empty());
 
-        // The remaining batch is outstanding in full, so it is dropped and new requests follow.
+        // A batch outstanding in full is dropped, and new requests follow above it.
+        sync.failed_requests.lock().extend((1_001..=1_005).map(|height| (height, (None, None))));
         for height in 1_006..=1_010 {
             sync.insert_block_request(height, (None, None, indexset![peer_ip])).unwrap();
         }
