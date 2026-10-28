@@ -1148,7 +1148,9 @@ impl<N: Network> BlockSync<N> {
         };
 
         // Do not hold lock here as, currently, `find_sync_peers_inner` can take a while.
-        let current_height = self.get_sync_height();
+        // Every height derived below is relative to the retention height, so that the re-request and
+        // new-request paths agree (see `retention_height`).
+        let current_height = self.retention_height();
 
         // Determine if there are any failed requests that need to be re-issued.
         //
@@ -1193,12 +1195,18 @@ impl<N: Network> BlockSync<N> {
                 let start_height = batch.first().unwrap().0;
                 let end_height = batch.last().unwrap().0 + 1;
 
-                // Set the maximum number of blocks, so that they do not exceed the end height.
-                let max_new_blocks_to_request = end_height - start_height;
-
-                // Re-issue from the first height not in the ledger and not already requested.
+                // Re-issue from the first height not in the ledger and not already requested, up to
+                // the end of the batch. A batch that is already requested in full is obsolete.
                 let start = self.first_unrequested_height(start_height);
-                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(start_height, Some(start))
+                let max_new_blocks_to_request = end_height.saturating_sub(start);
+                if max_new_blocks_to_request == 0 {
+                    for (height, _, _) in &batch {
+                        failed_requests.remove(height);
+                    }
+                    continue;
+                }
+
+                let Some((sync_peers, min_common_ancestor)) = self.find_sync_peers_inner(current_height, Some(start))
                 else {
                     // No connected peer can serve this range: they disconnected, or have all pruned it
                     // (see `sync_stuck_below_peer_floors`). The requests stay queued for a later round.
@@ -1234,7 +1242,10 @@ impl<N: Network> BlockSync<N> {
                 result.push((requests, sync_peers));
             }
 
-            return result;
+            // If every batch was obsolete, fall through to new requests.
+            if !result.is_empty() {
+                return result;
+            }
         }
 
         // Ensure to not exceed the maximum number of outstanding block requests.
@@ -2623,20 +2634,52 @@ mod tests {
         assert!(sync_peers.contains_key(&peer_ip));
     }
 
-    /// Tests that a failed batch starting below the ledger height is re-issued from the first height
-    /// the node needs, by a peer that serves that height.
+    /// Tests that a failed batch wholly below the ledger height is dropped, even while the sync height
+    /// lags the ledger, and new requests start at the first height the node needs.
     #[test]
-    fn test_failed_batch_reissued_from_first_unrequested_height() {
+    fn test_failed_batch_below_ledger_is_dropped() {
         let sync = BlockSync::<CurrentNetwork>::new(Arc::new(sample_ledger_service(0)), ConnectionMode::Router);
         let sync = BlockSync { ledger: Arc::new(sample_ledger_service(1_000)), ..sync };
+        assert_eq!(sync.get_sync_height(), 0);
         sync.failed_requests.lock().extend((990..=999).map(|height| (height, (None, None))));
         // The peer's assumed floor is 1,001: above the batch start, at the first height needed.
         let peer_ip = sample_peer_ip(1);
         sync.update_peer_locators(peer_ip, &sample_block_locators(1_000 + AUTHORITY_RETENTION_BLOCKS)).unwrap();
 
         let (requests, sync_peers) = sync.prepare_block_requests().pop().unwrap();
+        assert!(sync.failed_requests.lock().is_empty());
         assert_eq!(requests.first().unwrap().0, 1_001);
+        // The new-request path ran: it requests more than the dropped batch's 10 blocks.
+        assert!(requests.len() > 10);
         assert!(sync_peers.contains_key(&peer_ip));
+    }
+
+    /// Tests that a failed batch is re-issued from its first height not already requested, and only
+    /// up to its end; a batch that is already requested in full is dropped.
+    #[test]
+    fn test_failed_batch_reissued_from_first_unrequested_height() {
+        let sync = sample_sync_at_height(1_000);
+        let peer_ip = sample_peer_ip(1);
+        sync.update_peer_locators(peer_ip, &sample_block_locators(1_100)).unwrap();
+        sync.failed_requests.lock().extend((1_001..=1_010).map(|height| (height, (None, None))));
+        for height in 1_001..=1_005 {
+            sync.insert_block_request(height, (None, None, indexset![peer_ip])).unwrap();
+        }
+
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert_eq!(requests.iter().map(|(height, _)| *height).collect::<Vec<_>>(), (1_006..=1_010).collect::<Vec<_>>());
+        assert_eq!(
+            sync.failed_requests.lock().keys().copied().collect::<Vec<_>>(),
+            (1_001..=1_005).collect::<Vec<_>>()
+        );
+
+        // The remaining batch is outstanding in full, so it is dropped and new requests follow.
+        for height in 1_006..=1_010 {
+            sync.insert_block_request(height, (None, None, indexset![peer_ip])).unwrap();
+        }
+        let (requests, _) = sync.prepare_block_requests().pop().unwrap();
+        assert!(sync.failed_requests.lock().is_empty());
+        assert_eq!(requests.first().unwrap().0, 1_011);
     }
 
     /// Tests that a prepared batch is not sent to a peer whose learned floor rose above its start.
