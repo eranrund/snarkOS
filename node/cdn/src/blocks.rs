@@ -21,7 +21,7 @@ use snarkos_utilities::{SignalHandler, Stoppable};
 
 use snarkvm::{
     prelude::{Deserialize, DeserializeOwned, Ledger, Network, Serialize, block::Block, store::ConsensusStorage},
-    utilities::{flatten_error, unchecked_deserialize},
+    utilities::unchecked_deserialize,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -152,9 +152,7 @@ impl CdnBlockSync {
         match result {
             Ok(_) => CdnSyncOutcome::Synced,
             Err((completed_height, error)) => {
-                let error = error.context("Failed to sync block(s) from the CDN");
-                warn!("{}", flatten_error(&error));
-
+                // The caller logs the failure.
                 // If the sync made any progress, then check the integrity of the ledger.
                 if completed_height >= start_height {
                     debug!("Synced the ledger up to block {completed_height}");
