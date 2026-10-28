@@ -1195,8 +1195,9 @@ impl<N: Network> BlockSync<N> {
                 let start_height = batch.first().unwrap().0;
                 let end_height = batch.last().unwrap().0 + 1;
 
-                // Re-issue from the first height not in the ledger and not already requested, up to
-                // the end of the batch. A batch that is already requested in full is obsolete.
+                // Re-issue from the first height not already requested (the batch is above
+                // `current_height`, see above), up to the end of the batch. A batch that is already
+                // requested in full is obsolete.
                 let start = self.first_unrequested_height(start_height);
                 let max_new_blocks_to_request = end_height.saturating_sub(start);
                 if max_new_blocks_to_request == 0 {
@@ -1260,7 +1261,7 @@ impl<N: Network> BlockSync<N> {
 
         // The first height to request: the next one this node needs, or the first above it not
         // already requested.
-        let start_height = self.first_unrequested_height(self.retention_height().saturating_add(1));
+        let start_height = self.first_unrequested_height(current_height.saturating_add(1));
 
         // Prepare the block requests and sync peers, or returns an empty result if there is nothing to request.
         if self.num_total_block_requests() >= max_total_requests as usize {
@@ -1804,11 +1805,11 @@ impl<N: Network> BlockSync<N> {
         None
     }
 
-    /// Returns the first height at or above `height` that is above the ledger height and not
-    /// already requested.
+    /// Returns the first height at or above `height` that is not already requested. Callers pass a
+    /// height above `retention_height`, so the result is above the ledger height.
     fn first_unrequested_height(&self, height: u32) -> u32 {
         let requests = self.requests.read();
-        let mut height = height.max(self.ledger.latest_block_height().saturating_add(1));
+        let mut height = height;
         while requests.contains_key(&height) {
             height += 1;
         }
